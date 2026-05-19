@@ -47,7 +47,7 @@
 	// Optional:
 	//		Description of this driver
 	//
-	"description": ["Converts incoming text into speech using Kokoro-82M (local KPipeline or --modelserver KokoroLoader).", "Output is sent on the audio lane as WAV bytes.", "See README for spaCy en_core_web_sm (misaki) and troubleshooting."],
+	"description": ["Converts incoming text into speech using Kokoro-82M (local KPipeline or --modelserver KokoroLoader) or cloud TTS engines (OpenAI, ElevenLabs).", "Output is sent on the audio lane as WAV bytes for Kokoro and MP3 (or the configured format) for cloud engines.", "Cloud engines call vendor APIs directly from the engine host and do not go through the model server.", "See README for spaCy en_core_web_sm (misaki) setup, API key configuration, and troubleshooting."],
 	//
 	// Optional:
 	//	  The icon to display in the UI for this node
@@ -78,6 +78,18 @@
 			"kokoro": {
 				"engine": "kokoro",
 				"kokoro_voice": "af_heart"
+			},
+			"openai": {
+				"engine": "openai",
+				"openai_model": "gpt-4o-mini-tts",
+				"openai_voice": "alloy",
+				"api_key": ""
+			},
+			"elevenlabs": {
+				"engine": "elevenlabs",
+				"elevenlabs_model": "eleven_multilingual_v2",
+				"elevenlabs_voice": "EXAVITQu4vr4xnSDxMaL",
+				"api_key": ""
 			}
 		}
 	},
@@ -151,21 +163,116 @@
 				["pm_santa", "Portuguese — pm_santa"]
 			]
 		},
+		// ── OpenAI ────────────────────────────────────────────────────────────
+		"audio_tts.openai_model": {
+			"type": "string",
+			"title": "Model",
+			"description": "OpenAI TTS model id.",
+			"default": "gpt-4o-mini-tts",
+			"enum": [
+				["gpt-4o-mini-tts", "GPT-4o mini TTS"],
+				["gpt-4o-tts", "GPT-4o TTS"],
+				["tts-1", "TTS-1"],
+				["tts-1-hd", "TTS-1 HD"]
+			]
+		},
+		"audio_tts.openai_voice": {
+			"type": "string",
+			"title": "Voice",
+			"description": "OpenAI TTS voice (GPT-4o TTS models support additional voices).",
+			"default": "alloy",
+			"enum": [
+				["alloy", "Alloy"],
+				["ash", "Ash"],
+				["ballad", "Ballad"],
+				["coral", "Coral"],
+				["echo", "Echo"],
+				["fable", "Fable"],
+				["onyx", "Onyx"],
+				["nova", "Nova"],
+				["sage", "Sage"],
+				["shimmer", "Shimmer"],
+				["verse", "Verse"],
+				["marin", "Marin"],
+				["cedar", "Cedar"]
+			]
+		},
+		// ── ElevenLabs ────────────────────────────────────────────────────────
+		"audio_tts.elevenlabs_model": {
+			"type": "string",
+			"title": "Model",
+			"description": "ElevenLabs model_id.",
+			"default": "eleven_multilingual_v2",
+			"enum": [
+				["eleven_multilingual_v2", "Multilingual v2"],
+				["eleven_turbo_v2_5", "Turbo v2.5"],
+				["eleven_flash_v2_5", "Flash v2.5"],
+				["eleven_v3", "Eleven v3"],
+				["eleven_monolingual_v1", "Monolingual v1"]
+			]
+		},
+		"audio_tts.elevenlabs_voice": {
+			"type": "string",
+			"title": "Voice",
+			"description": "Premade ElevenLabs voice (voice_id).",
+			"default": "EXAVITQu4vr4xnSDxMaL",
+			"enum": [
+				["21m00Tcm4TlvDq8ikWAM", "Rachel"],
+				["AZnzlk1XvdvUeBnXmlld", "Domi"],
+				["EXAVITQu4vr4xnSDxMaL", "Bella"],
+				["ErXwobaYiN019PkySvjV", "Antoni"],
+				["MF3mGyEYCl7XYWbV9V6O", "Elli"],
+				["TxGEqnHWrfWFTfGW9XjX", "Josh"],
+				["VR6AewLTigWG4xSOukaG", "Arnold"],
+				["pNInz6obpgDQGcFmaJgB", "Adam"],
+				["yoZ06aMxZJJ28mfd3POQ", "Sam"]
+			]
+		},
+		// ── Shared (cloud engines) ────────────────────────────────────────────
+		"audio_tts.api_key": {
+			"type": "string",
+			"title": "API key",
+			"description": "API key for the selected cloud TTS engine. Falls back to OPENAI_API_KEY / ELEVENLABS_API_KEY environment variables when blank.",
+			"secure": true,
+			"ui": {
+				"ui:widget": "ApiKeyWidget"
+			}
+		},
 		// ── Form objects (one per profile) ────────────────────────────────────
 		"audio_tts.form.kokoro": {
 			"object": "kokoro",
 			"properties": ["audio_tts.kokoro_voice"]
+		},
+		"audio_tts.form.openai": {
+			"object": "openai",
+			"properties": ["audio_tts.openai_model", "audio_tts.openai_voice", "audio_tts.api_key"]
+		},
+		"audio_tts.form.elevenlabs": {
+			"object": "elevenlabs",
+			"properties": ["audio_tts.elevenlabs_model", "audio_tts.elevenlabs_voice", "audio_tts.api_key"]
 		},
 		// ── Profile selector (drives conditional form rendering) ───────────────
 		"audio_tts.profile": {
 			"title": "TTS profile",
 			"type": "string",
 			"default": "kokoro",
-			"enum": [["kokoro", "Kokoro"]],
+			"enum": [
+				["kokoro", "Kokoro"],
+				["openai", "OpenAI TTS"],
+				["elevenlabs", "ElevenLabs"]
+			],
 			"conditional": [
 				{
 					"value": "kokoro",
 					"properties": ["audio_tts.form.kokoro"]
+				},
+				{
+					"value": "openai",
+					"properties": ["audio_tts.form.openai"]
+				},
+				{
+					"value": "elevenlabs",
+					"properties": ["audio_tts.form.elevenlabs"]
 				}
 			]
 		}
