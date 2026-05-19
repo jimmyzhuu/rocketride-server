@@ -159,10 +159,11 @@ export default function Flow({ oauth2RootUrl, project, servicesJson, taskStatuse
 	// Rebuild MUI theme from --rr-* CSS custom properties
 	const currentTheme = useMemo(() => getMuiTheme(), [themeVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
-	// Sync --icon-filter on <body> whenever the theme changes
+	// Sync --icon-color on <body> whenever the theme changes.
+	// Monochrome icons inherit this via `currentColor` (rewritten at build time).
 	useEffect(() => {
-		const iconFilter = currentTheme.palette.mode === 'dark' ? 'brightness(0) invert(1)' : 'none';
-		document.body.style.setProperty('--icon-filter', iconFilter);
+		const iconColor = currentTheme.palette.mode === 'dark' ? '#ffffff' : '#1f1f1f';
+		document.body.style.setProperty('--icon-color', iconColor);
 	}, [currentTheme]);
 
 	// --- Render --------------------------------------------------------------

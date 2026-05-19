@@ -20,7 +20,7 @@ import { useFlowProject } from '../../../context/FlowProjectContext';
 import { IService, IServiceCapabilities, IServiceLane } from '../../../types';
 import { getOutputLaneDisplayValues, renameInvokeType } from '../../../util/helpers';
 import { generateNodeId } from '../../../util';
-import { getIconPath } from '../../../util/get-icon-path';
+import { Icon } from '../../../util/Icon';
 import { commonStyles } from '../../../../../themes/styles';
 
 // =============================================================================
@@ -404,19 +404,8 @@ export default function QuickAddPopup(): ReactElement | null {
 								(e.currentTarget as HTMLElement).style.backgroundColor = '';
 							}}
 						>
-							{(() => {
-								const icon = getIconPath(service.icon);
-								return (
-									<img
-										src={icon}
-										alt=""
-										style={{
-											...styles.itemIcon,
-											filter: icon.includes('#td') ? 'var(--icon-filter)' : undefined,
-										}}
-									/>
-								);
-							})()}
+							<Icon name={service.icon} style={styles.itemIcon} />
+
 							<span style={styles.itemTitle}>{service.title ?? key}</span>
 							{Array.isArray(service.classType) && service.classType.includes('tool') && <span style={styles.badge}>Tool</span>}
 							{!!(service.capabilities && IServiceCapabilities.Experimental & service.capabilities) && <span style={styles.experimentalBadge}>Experimental</span>}
