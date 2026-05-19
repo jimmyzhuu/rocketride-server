@@ -175,6 +175,7 @@ class AgentBase(ABC):
                 framework=self.FRAMEWORK,
                 started_at=started_at,
                 chat_id=getattr(question, 'chat_id', None),
+                attachments=tuple(getattr(question, 'attachments', []) or []),
             )
 
             # And execute
@@ -313,11 +314,12 @@ class AgentBase(ABC):
         from rocketlib.types import IInvokeLLM
 
         if isinstance(prompt, Question):
-            q = prompt
+            q = prompt  # caller's Question wins; their decision about attachments stands
         else:
             transcript = messages_to_transcript(prompt)
             q = Question(role=role or '')
             q.addQuestion(transcript)
+            q.attachments = list(context.attachments)  # propagate from run-entry. TDD §8.1.
 
         result = context.llm.invoke(IInvokeLLM.Ask(question=q))
         return truncate_at_stop_words(extract_text(result), stop_words)
@@ -355,11 +357,12 @@ class AgentBase(ABC):
         from rocketlib.types import IInvokeLLM
 
         if isinstance(prompt, Question):
-            q = prompt
+            q = prompt  # caller's Question wins; their decision about attachments stands
         else:
             transcript = messages_to_transcript(prompt)
             q = Question(role=role or '')
             q.addQuestion(transcript)
+            q.attachments = list(context.attachments)  # propagate from run-entry. TDD §8.1.
 
         result = context.llm.invoke(IInvokeLLM.Ask(question=q))
         return result.getJson()
@@ -440,7 +443,9 @@ class AgentBase(ABC):
         return [
             {
                 'name': self._RECALL_HISTORY_TOOL_NAME,
-                'description': ('Read older turns from this chat session beyond the eager last-3 context already in the prompt. Returns turn records (each with the full Question/Answer that produced it) in most-recent-first order.'),
+                'description': (
+                    'Read older turns from this chat session beyond the eager last-3 context already in the prompt. Returns turn records (each with the full Question/Answer that produced it) in most-recent-first order.'
+                ),
                 'inputSchema': {
                     'type': 'object',
                     'properties': {
@@ -451,7 +456,9 @@ class AgentBase(ABC):
                         },
                         'limit': {
                             'type': 'integer',
-                            'description': (f'Maximum turns to return (default {self._RECALL_HISTORY_DEFAULT_LIMIT}, max {self._RECALL_HISTORY_MAX_LIMIT}).'),
+                            'description': (
+                                f'Maximum turns to return (default {self._RECALL_HISTORY_DEFAULT_LIMIT}, max {self._RECALL_HISTORY_MAX_LIMIT}).'
+                            ),
                             'minimum': 1,
                             'maximum': self._RECALL_HISTORY_MAX_LIMIT,
                         },
@@ -533,7 +540,9 @@ class AgentBase(ABC):
             line_ver = rec.get('schema_version', 1)
             if isinstance(line_ver, int) and line_ver > self._HISTORY_SCHEMA_VERSION:
                 rec = dict(rec)
-                rec['schema_version_warning'] = f'line schema_version={line_ver} > reader={self._HISTORY_SCHEMA_VERSION}; treat as opaque'
+                rec['schema_version_warning'] = (
+                    f'line schema_version={line_ver} > reader={self._HISTORY_SCHEMA_VERSION}; treat as opaque'
+                )
             if before_int is not None:
                 try:
                     if int(rec.get('seq', 0)) >= before_int:
@@ -575,4 +584,6 @@ class AgentBase(ABC):
         except RuntimeError:
             return asyncio.run(file_store.read(path))
         else:
-            raise RuntimeError('_recall_history cannot run inside an active event loop; AgentBase.call_tool is invoked synchronously by drivers.')
+            raise RuntimeError(
+                '_recall_history cannot run inside an active event loop; AgentBase.call_tool is invoked synchronously by drivers.'
+            )

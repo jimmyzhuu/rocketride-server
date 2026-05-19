@@ -305,3 +305,11 @@ class AgentContext:
     # can scope reads to .chats/<chat_id>/chat.jsonl.  None when the
     # caller is not chat-aware (toggle off, non-chat pipeline, etc.).
     chat_id: Optional[str] = None
+
+    # Attachments scoped to this agent run — captured at the top of
+    # AgentBase.run_agent from Question.attachments and threaded onto
+    # every synthesized Question in call_llm / call_llm_json so the
+    # provider-side translators in LLMBase can auto-forward them.
+    # Per TDD §8.1. Tuple for the frozen dataclass; Attachment Pydantic
+    # models are themselves immutable-ish.
+    attachments: tuple = ()
