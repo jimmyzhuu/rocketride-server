@@ -49,14 +49,17 @@
 				"modelSource": "manual",
 				"modelTotalTokens": 128000, // openrouter
 				"modelOutputTokens": 4096, // default
-				"apikey": ""
+				"apikey": "",
+				"capabilities": {
+					"reasoning": true
+				}
 			},
 			"sonar-reasoning": {
 				"title": "Sonar Reasoning",
 				"model": "sonar-reasoning",
 				"modelSource": "manual",
-				"modelTotalTokens": 128000,
-				"modelOutputTokens": 4096,
+				"modelTotalTokens": 128000, // manual
+				"modelOutputTokens": 4096, // manual
 				"apikey": ""
 			},
 			"sonar-deep-research": {
@@ -65,7 +68,10 @@
 				"modelSource": "manual",
 				"modelTotalTokens": 128000, // openrouter
 				"modelOutputTokens": 4096, // default
-				"apikey": ""
+				"apikey": "",
+				"capabilities": {
+					"reasoning": true
+				}
 			},
 			"sonar-pro-search": {
 				"title": "Perplexity: Sonar Pro Search",
@@ -73,7 +79,10 @@
 				"modelSource": "openrouter",
 				"modelTotalTokens": 200000, // openrouter
 				"modelOutputTokens": 8000, // openrouter
-				"apikey": ""
+				"apikey": "",
+				"capabilities": {
+					"reasoning": true
+				}
 			}
 		}
 	},
