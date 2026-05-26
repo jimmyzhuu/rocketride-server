@@ -22,6 +22,14 @@
 
 <img src="https://raw.githubusercontent.com/rocketride-org/rocketride-server/develop/docs/images/canvas.png" alt="RocketRide visual canvas builder" width="800">
 
+> **Linux users:** the downloaded engine is dynamically linked against the system C++ runtime. On Ubuntu/Debian, install once:
+>
+> ```bash
+> sudo apt install -y libc++1 libc++abi1 libgomp1
+> ```
+>
+> The extension auto-detects missing libraries after install and offers a one-click prompt with the right command for your distribution. See [Linux runtime requirements](https://github.com/rocketride-org/rocketride-server/blob/develop/docs/setup/LINUX_RUNTIME.md) for other distros and troubleshooting.
+
 ## What is RocketRide?
 
 [RocketRide](https://rocketride.org) is an open-source, developer-native AI pipeline platform.

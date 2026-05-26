@@ -34,6 +34,7 @@ import * as https from 'https';
 import * as http from 'http';
 import * as os from 'os';
 import * as lockfile from 'proper-lockfile';
+import { execFile, execFileSync } from 'child_process';
 import { getLogger } from '../../shared/util/output';
 import { icons } from '../../shared/util/icons';
 
@@ -222,7 +223,15 @@ export class EngineInstaller {
 		}
 
 		try {
-			return await this.installUnderLock(versionSpec, progress, token, githubToken);
+			const exePath = await this.installUnderLock(versionSpec, progress, token, githubToken);
+			// Run the runtime-dep check on EVERY install attempt, not just fresh
+			// downloads. installUnderLock has three return paths (fresh download,
+			// "already up to date" short-circuit, GitHub-unreachable fallback);
+			// users whose engine was installed before this check existed only hit
+			// the latter two, so putting the check here is the only way to reach
+			// them without forcing a manual uninstall+reinstall.
+			this.checkLinuxRuntimeDeps(exePath);
+			return exePath;
 		} finally {
 			try { await release(); } catch { /* ignore stale lock */ }
 		}
@@ -348,6 +357,9 @@ export class EngineInstaller {
 			if (!fs.existsSync(exePath)) {
 				throw new Error(`Engine extraction completed but executable not found at: ${exePath}`);
 			}
+
+			// (Runtime dep check runs in install() after this returns, so it
+			// covers fresh downloads AND "already installed" short-circuits.)
 
 			// Write version file so we know what's installed
 			this.writeVersionJson({ tag: release.tag_name, publishedAt: release.published_at });
@@ -702,6 +714,404 @@ export class EngineInstaller {
 	private delay(ms: number): Promise<void> {
 		return new Promise(resolve => setTimeout(resolve, ms));
 	}
+
+	// =========================================================================
+	// LINUX RUNTIME DEPENDENCY CHECK
+	// =========================================================================
+
+	/**
+	 * On Linux, runs `ldd` against the freshly extracted engine binary and looks
+	 * for missing shared libraries. If any of the known C++ runtime libs are
+	 * missing, prompts the user with distro-appropriate install commands.
+	 * Non-fatal: install always succeeds — the warning is informational so the
+	 * user can fix things before the first engine start fails.
+	 */
+	private checkLinuxRuntimeDeps(exePath: string): void {
+		if (process.platform !== 'linux') return;
+
+		const missingLibs = this.findMissingSharedLibs(exePath);
+		if (missingLibs === null) return; // ldd unavailable — best-effort, skip
+		if (missingLibs.length === 0) return;
+
+		this.logger.output(`${icons.warning} Engine has missing runtime libraries: ${missingLibs.join(', ')}`);
+
+		const distro = this.detectLinuxDistro();
+		if (!distro) {
+			// Unknown distro — surface raw lib names and link to docs.
+			void this.showUnknownDistroWarning(missingLibs);
+			return;
+		}
+
+		const packages = missingLibs
+			.map(lib => distro.libToPackage[lib])
+			.filter((p): p is string => !!p);
+
+		// Dedupe (Arch maps multiple libs → gcc-libs)
+		const uniquePackages = Array.from(new Set(packages));
+
+		if (uniquePackages.length === 0) {
+			// Libs missing but none we know how to install — surface raw names.
+			void this.showUnknownDistroWarning(missingLibs);
+			return;
+		}
+
+		void this.showLinuxDepsWarning(distro, uniquePackages);
+	}
+
+	/**
+	 * Runs `ldd` against the binary and returns the list of missing `.so` names.
+	 * Returns null if ldd itself failed (binary not exec'able, ldd missing,
+	 * etc.) — caller treats null as "skip the check, don't bother the user."
+	 */
+	private findMissingSharedLibs(exePath: string): string[] | null {
+		let lddOutput: string;
+		try {
+			lddOutput = execFileSync('ldd', [exePath], {
+				encoding: 'utf8',
+				stdio: ['ignore', 'pipe', 'pipe'],
+			});
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			this.logger.output(`${icons.info} Skipped Linux runtime dep check: ${msg}`);
+			return null;
+		}
+
+		// ldd lines for missing libs look like: "\tlibc++.so.1 => not found"
+		const missing: string[] = [];
+		for (const line of lddOutput.split('\n')) {
+			if (!line.includes('=> not found')) continue;
+			const soMatch = line.trim().match(/^(\S+)\s*=>/);
+			if (soMatch && !missing.includes(soMatch[1])) {
+				missing.push(soMatch[1]);
+			}
+		}
+		return missing;
+	}
+
+	/**
+	 * Reads /etc/os-release and returns the package manager + .so→package map
+	 * for the detected distro. Returns null if the distro isn't recognized
+	 * (caller falls back to a generic "see docs" warning).
+	 *
+	 * Distro families:
+	 *   apt    → Debian, Ubuntu, Mint, Pop!_OS, Kali, Raspbian
+	 *   dnf    → Fedora, RHEL, CentOS, Rocky, AlmaLinux, Oracle Linux
+	 *   pacman → Arch, Manjaro, EndeavourOS
+	 *   zypper → openSUSE Leap/Tumbleweed, SLES
+	 */
+	private detectLinuxDistro(): LinuxDistroInfo | null {
+		let osRelease: string;
+		try {
+			osRelease = fs.readFileSync('/etc/os-release', 'utf8');
+		} catch {
+			return null;
+		}
+
+		// Extract ID and ID_LIKE (e.g. ID=ubuntu / ID_LIKE="debian gnu/linux")
+		const ids: string[] = [];
+		for (const line of osRelease.split('\n')) {
+			const m = line.match(/^(ID|ID_LIKE)="?([^"\n]+)"?/);
+			if (!m) continue;
+			for (const token of m[2].split(/\s+/)) {
+				if (token && !ids.includes(token.toLowerCase())) {
+					ids.push(token.toLowerCase());
+				}
+			}
+		}
+
+		const has = (...needles: string[]) => needles.some(n => ids.includes(n));
+
+		if (has('debian', 'ubuntu', 'raspbian', 'mint', 'pop', 'kali')) {
+			return {
+				family: 'apt',
+				prettyName: 'Debian/Ubuntu',
+				installPrefix: 'sudo apt install -y',
+				pkexecArgs: ['apt', 'install', '-y'],
+				libToPackage: {
+					'libc++.so.1': 'libc++1',
+					'libc++abi.so.1': 'libc++abi1',
+					'libgomp.so.1': 'libgomp1',
+				},
+			};
+		}
+
+		if (has('fedora', 'rhel', 'centos', 'rocky', 'almalinux', 'ol')) {
+			return {
+				family: 'dnf',
+				prettyName: 'Fedora/RHEL',
+				installPrefix: 'sudo dnf install -y',
+				pkexecArgs: ['dnf', 'install', '-y'],
+				libToPackage: {
+					'libc++.so.1': 'libcxx',
+					'libc++abi.so.1': 'libcxxabi',
+					'libgomp.so.1': 'libgomp',
+				},
+			};
+		}
+
+		if (has('arch', 'manjaro', 'endeavouros')) {
+			return {
+				family: 'pacman',
+				prettyName: 'Arch',
+				installPrefix: 'sudo pacman -S --needed --noconfirm',
+				pkexecArgs: ['pacman', '-S', '--needed', '--noconfirm'],
+				libToPackage: {
+					'libc++.so.1': 'libc++',
+					'libc++abi.so.1': 'libc++abi',
+					// libgomp on Arch ships inside gcc-libs (part of base, shouldn't be missing,
+					// but include for completeness — pacman is happy to reinstall).
+					'libgomp.so.1': 'gcc-libs',
+				},
+			};
+		}
+
+		if (has('opensuse', 'opensuse-leap', 'opensuse-tumbleweed', 'sles', 'suse')) {
+			return {
+				family: 'zypper',
+				prettyName: 'openSUSE',
+				installPrefix: 'sudo zypper install -y',
+				pkexecArgs: ['zypper', 'install', '-y'],
+				libToPackage: {
+					'libc++.so.1': 'libc++1',
+					'libc++abi.so.1': 'libc++abi1',
+					'libgomp.so.1': 'libgomp1',
+				},
+			};
+		}
+
+		return null;
+	}
+
+	/**
+	 * Heuristic check for whether the current user can run `sudo`. We try
+	 * `sudo -n -v` (non-interactive credential validation) and inspect the
+	 * stderr. Three outcomes:
+	 *   - exit 0: cached creds or NOPASSWD — sudo will work without prompting
+	 *   - stderr says "may not run" / "not in the sudoers" → no access
+	 *   - stderr asks for password → access exists, password needed
+	 *
+	 * We deliberately don't try to detect the cached/NOPASSWD case separately;
+	 * for the button decision we only care about "has access" vs "doesn't".
+	 */
+	private hasSudoAccess(): 'available' | 'missing-binary' | 'no-access' {
+		// sudo binary itself missing (rare — minimal containers, embedded systems)
+		try {
+			execFileSync('sh', ['-c', 'command -v sudo'], { stdio: ['ignore', 'pipe', 'pipe'] });
+		} catch {
+			return 'missing-binary';
+		}
+
+		try {
+			execFileSync('sudo', ['-n', '-v'], { stdio: ['ignore', 'pipe', 'pipe'] });
+			return 'available'; // cached creds or NOPASSWD
+		} catch (err) {
+			// sudo -n -v exited non-zero. The stderr tells us why.
+			const stderr = (err as { stderr?: Buffer | string }).stderr;
+			const text = typeof stderr === 'string' ? stderr : stderr?.toString('utf8') ?? '';
+			// "a password is required" or "sudo: a terminal is required" → user
+			// HAS access but sudo couldn't prompt (which is fine — the terminal
+			// in VSCode will prompt interactively when they run the command).
+			if (/password is required|terminal is required/i.test(text)) {
+				return 'available';
+			}
+			// "user X is not in the sudoers file" / "X may not run sudo" → no access.
+			if (/not in the sudoers|may not run/i.test(text)) {
+				return 'no-access';
+			}
+			// Unknown failure mode — assume available and let the user find out;
+			// false positives here are less annoying than false negatives.
+			return 'available';
+		}
+	}
+
+	/** Returns true if `/usr/bin/pkexec` exists and is executable. */
+	private hasPkexec(): boolean {
+		try {
+			fs.accessSync('/usr/bin/pkexec', fs.constants.X_OK);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * Shows a warning when libs are missing but the distro is unrecognized.
+	 * The user gets the raw lib names plus a link to the docs page that lists
+	 * commands for every supported distro family.
+	 */
+	private async showUnknownDistroWarning(missingLibs: string[]): Promise<void> {
+		const choice = await vscode.window.showWarningMessage(
+			`The RocketRide engine has missing shared libraries: ${missingLibs.join(', ')}. See the docs for distro-specific install commands.`,
+			{ modal: true },
+			'Learn More'
+		);
+		if (choice === 'Learn More') {
+			void vscode.env.openExternal(
+				vscode.Uri.parse('https://github.com/rocketride-org/rocketride-server/blob/develop/docs/setup/LINUX_RUNTIME.md')
+			);
+		}
+	}
+
+	/**
+	 * Shows the distro-specific install warning. UX intentionally minimal:
+	 * one primary action ("Install Dependencies") that picks the right
+	 * elevation mechanism internally — pkexec when available for a native
+	 * GUI password popup, terminal fallback otherwise. Plus "Learn More"
+	 * for the detailed docs. The modal is blocking so the warning can't
+	 * be missed, and the consequence of cancelling is spelled out in
+	 * `detail` + a follow-up info notification.
+	 */
+	private async showLinuxDepsWarning(distro: LinuxDistroInfo, packages: string[]): Promise<void> {
+		// Same-arch case: single apt/dnf/pacman install, no sources.list
+		// configuration needed. runInstall wraps with sh -c + pkexec (or sudo
+		// in a terminal). The shellCmd has no sudo prefix because the elevation
+		// is added by runInstall depending on which path it takes.
+		const shellCmd = `${distro.pkexecArgs.join(' ')} ${packages.join(' ')}`;
+		const terminalCmd = `${distro.installPrefix} ${packages.join(' ')}`;
+		const sudoStatus = this.hasSudoAccess();
+		const canInstall = sudoStatus === 'available' || sudoStatus === 'missing-binary';
+
+		const baseMsg = `RocketRide needs ${packages.length === 1 ? 'a system library' : 'system libraries'} not yet installed on this ${distro.prettyName} system: ${packages.join(', ')}.`;
+
+		const cancelConsequence = sudoStatus === 'no-access'
+			? `Your account does not have sudo access — ask your administrator to run: ${terminalCmd}`
+			: `Without these libraries the engine cannot start. If you cancel, run this command later to install them: ${terminalCmd}`;
+
+		const buttons: string[] = [];
+		if (canInstall) buttons.push('Install System Dependency');
+		buttons.push('Learn More');
+
+		const choice = await vscode.window.showWarningMessage(
+			baseMsg,
+			{ modal: true, detail: cancelConsequence },
+			...buttons,
+		);
+
+		if (choice === 'Install System Dependency') {
+			await this.runInstall({
+				shellCmd,
+				terminalCmd,
+				purpose: 'system libraries',
+			});
+		} else if (choice === 'Learn More') {
+			void vscode.env.openExternal(
+				vscode.Uri.parse('https://github.com/rocketride-org/rocketride-server/blob/develop/docs/setup/LINUX_RUNTIME.md')
+			);
+		} else if (canInstall) {
+			// User dismissed (Cancel / Escape / X). Surface a non-modal info
+			// reminder with the manual command so they aren't left wondering
+			// what to do when the engine fails to start on the next click.
+			void vscode.window.showInformationMessage(
+				`RocketRide will fail to start until you install: ${terminalCmd}`,
+				'Copy Command',
+			).then(c => {
+				if (c === 'Copy Command') void vscode.env.clipboard.writeText(terminalCmd);
+			});
+		}
+	}
+
+	/**
+	 * Runs an elevated install command. Two paths:
+	 *
+	 *   • pkexec available → execFile pkexec with sh -c <shellCmd>, wrapped
+	 *     in a VS Code progress notification. The desktop environment shows
+	 *     its native GUI password dialog (polkitd handles the password — it
+	 *     never touches Node); apt runs silently; user gets a success/error
+	 *     toast. No terminal visible.
+	 *
+	 *   • pkexec missing → open integrated terminal with the sudo command
+	 *     pre-typed but NOT executed. User reviews, hits Enter, sudo asks
+	 *     for the password directly on the TTY.
+	 *
+	 * Either elevation path keeps the password out of the extension process.
+	 *
+	 * @param opts.shellCmd - The install invocation without sudo (e.g.
+	 *     "apt install -y libc++1 libc++abi1 libgomp1"). pkexec adds root.
+	 * @param opts.terminalCmd - Full command for terminal/manual fallback,
+	 *     usually shellCmd prefixed with "sudo " (shown in error/cancel toasts).
+	 * @param opts.purpose - Human-readable purpose for progress/toast UI
+	 *     (e.g. "system libraries").
+	 */
+	private async runInstall(opts: { shellCmd: string; terminalCmd: string; purpose: string }): Promise<void> {
+		const pkexecAvailable = this.hasPkexec();
+
+		if (pkexecAvailable) {
+			try {
+				await vscode.window.withProgress(
+					{
+						location: vscode.ProgressLocation.Notification,
+						title: `Installing ${opts.purpose}...`,
+						cancellable: false,
+					},
+					() => new Promise<void>((resolve, reject) => {
+						// pkexec runs a single binary as root. Going through
+						// `sh -c` lets us pass shellCmd as one quoted argument.
+						const child = execFile(
+							'pkexec',
+							['sh', '-c', opts.shellCmd],
+							{ timeout: 5 * 60 * 1000 },
+							(err: Error | null, _stdout: string, stderr: string) => {
+								if (err) reject(new Error(stderr?.trim() || err.message));
+								else resolve();
+							},
+						);
+						// Callback handles completion; nothing else to do with the handle.
+						void child;
+					}),
+				);
+				void vscode.window.showInformationMessage(
+					`Installed ${opts.purpose}. RocketRide is ready to start.`,
+				);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				// pkexec returns "Not authorized" / "dismissed" when the user
+				// cancels the password dialog — a normal user action, not an
+				// extension failure. Differentiate from real apt errors.
+				if (/dismissed|cancell?ed|Not authorized|Authentication failed/i.test(msg)) {
+					void vscode.window.showWarningMessage(
+						`Installation cancelled. RocketRide will fail to start until you install: ${opts.terminalCmd}`,
+					);
+				} else {
+					void vscode.window.showErrorMessage(
+						`Failed to install ${opts.purpose}: ${msg}. Try running manually: ${opts.terminalCmd}`,
+					);
+				}
+			}
+		} else {
+			// Fallback: open terminal with the sudo command pre-typed (NOT
+			// executed). The user reviews, edits if needed, and presses Enter.
+			// sudo's password prompt comes from the TTY directly.
+			const terminal = vscode.window.createTerminal({
+				name: `RocketRide: install ${opts.purpose}`,
+			});
+			terminal.show();
+			terminal.sendText(opts.terminalCmd, false);
+			void vscode.window.showInformationMessage(
+				'A terminal was opened with the install command. Review and press Enter to run it.',
+			);
+		}
+	}
+}
+
+// =============================================================================
+// LINUX DISTRO TYPES (used by EngineInstaller above)
+// =============================================================================
+
+/**
+ * Distro family info for building install commands. One of these is returned
+ * by detectLinuxDistro() per supported family.
+ */
+interface LinuxDistroInfo {
+	/** Package manager family. */
+	family: 'apt' | 'dnf' | 'pacman' | 'zypper';
+	/** Short human-readable name for messages (e.g. "Debian/Ubuntu"). */
+	prettyName: string;
+	/** Full shell prefix including sudo (e.g. "sudo apt install -y"). */
+	installPrefix: string;
+	/** Argv (without "pkexec" or "sudo") for the pkexec-prefixed variant. */
+	pkexecArgs: string[];
+	/** Map .so name → package name in this distro's repos. */
+	libToPackage: Record<string, string>;
 }
 
 // =============================================================================
